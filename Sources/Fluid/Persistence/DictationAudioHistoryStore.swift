@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 struct DictationAudioSnapshot: Sendable {
@@ -24,6 +25,7 @@ struct DictationAudioMetadata: Codable, Equatable, Sendable {
 enum DictationAudioHistoryError: LocalizedError {
     case applicationSupportUnavailable
     case audioMissing
+    case audioUnreadable
     case noAudioEntries
     case zipFailed(String)
 
@@ -33,6 +35,8 @@ enum DictationAudioHistoryError: LocalizedError {
             return "Could not access Application Support."
         case .audioMissing:
             return "Saved audio is missing."
+        case .audioUnreadable:
+            return "Saved audio could not be read."
         case .noAudioEntries:
             return "No saved dictation audio is available to export."
         case let .zipFailed(message):
@@ -103,13 +107,21 @@ final nonisolated class DictationAudioHistoryStore: @unchecked Sendable {
     }
 
     /// 16 kHz mono samples of an entry's saved recording, for retranscription.
+    /// Uses the same AVAudioFile and converter path as file and meeting transcription.
     func loadSamples(for entry: TranscriptionHistoryEntry) throws -> [Float] {
         guard let url = self.audioFileURL(for: entry),
               self.fileManager.fileExists(atPath: url.path)
         else {
             throw DictationAudioHistoryError.audioMissing
         }
-        return try DictationAudioWAVDecoder.samples(contentsOf: url)
+        let file = try AVAudioFile(forReading: url)
+        guard file.length > 0 else { return [] }
+        let frameCount = AVAudioFrameCount(file.length)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
+            throw DictationAudioHistoryError.audioUnreadable
+        }
+        try file.read(into: buffer, frameCount: frameCount)
+        return try AudioBufferConverter.monoSamples(from: buffer, targetSampleRate: 16_000)
     }
 
     func audioFileExists(fileName: String) -> Bool {

@@ -3999,7 +3999,13 @@ final class ASRService: ObservableObject {
 
     /// Runs a saved dictation recording through `model` without changing the
     /// selected model. Another model is loaded for this call only and released
-    /// when it returns. Nothing is downloaded: the model must already be installed.
+    /// when it returns. Nothing app-managed is downloaded, and Apple SpeechAnalyzer
+    /// is refused when its language assets are missing.
+    ///
+    /// The `historyRetranscription` lease is the only admission gate. It also keeps
+    /// meeting model residency out, because the speech residency participant only
+    /// admits a meeting while the `.meeting` lease is held. Plain downloads and
+    /// deletions take no lease, so they are checked here.
     func retranscribeSavedAudio(
         _ inputSamples: [Float],
         with model: SettingsStore.SpeechModel
@@ -4007,30 +4013,42 @@ final class ASRService: ObservableObject {
         let lease = try self.acquireExclusiveActivity(.historyRetranscription)
         defer { self.releaseExclusiveActivity(lease) }
         guard !inputSamples.isEmpty else { throw HistoryRetranscriptionError.emptyAudio }
+        guard !self.hasActiveModelDownload, self.deletingModelID == nil else {
+            throw HistoryRetranscriptionError.modelMaintenanceInProgress
+        }
 
         var samples = inputSamples
+        // Same one-second minimum as dictation and the Local API: short input is padded with silence.
         let minSamples = 16_000
         if samples.count < minSamples {
             samples.append(contentsOf: repeatElement(0.0, count: minSamples - samples.count))
         }
 
+        let isSelected = model == SettingsStore.shared.selectedSpeechModel
+        let candidate = isSelected ? self.transcriptionProvider : self.getProvider(for: model)
+        // Check before preparing: both ensureAsrReady and prepare download missing files.
+        guard try await self.retranscriptionModelIsInstalled(candidate) else {
+            throw HistoryRetranscriptionError.modelNotInstalled(model.displayName)
+        }
+
         let provider: TranscriptionProvider
-        if model == SettingsStore.shared.selectedSpeechModel {
+        if isSelected {
             try await self.ensureAsrReady()
             provider = self.transcriptionProvider
         } else {
-            let candidate = self.getProvider(for: model)
-            // Apple's system models have no app-managed files to check.
-            let isBuiltIn = model == .appleSpeech || model == .appleSpeechAnalyzer
-            if !isBuiltIn {
-                guard try await self.modelArtifactsExist(provider: candidate) else {
-                    throw HistoryRetranscriptionError.modelNotInstalled(model.displayName)
-                }
-            }
             try await candidate.prepare(progressHandler: nil)
             provider = candidate
         }
         return try await self.runRetranscription(samples, provider: provider)
+    }
+
+    private func retranscriptionModelIsInstalled(_ provider: TranscriptionProvider) async throws -> Bool {
+        #if canImport(Speech)
+        if #available(macOS 26.0, *), let analyzer = provider as? AppleSpeechAnalyzerProvider {
+            return await analyzer.refreshModelsExistOnDiskAsync()
+        }
+        #endif
+        return try await self.modelArtifactsExist(provider: provider)
     }
 
     private func runRetranscription(

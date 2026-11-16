@@ -379,7 +379,7 @@ func awaitGate(_ gate: Gate) async {
         await awaitGate(restoreGate)
         let restoringASR = AppServices.shared.asr
         expect(restoringASR.activeExclusiveActivity == .settingsRestore, "import reserves ASR before the profile actor hop")
-        for activity: ASRExclusiveActivity in [.dictation, .fileTranscription, .localAPI, .meeting, .modelMaintenance] {
+        for activity: ASRExclusiveActivity in [.dictation, .fileTranscription, .localAPI, .historyRetranscription, .meeting, .modelMaintenance] {
             do {
                 _ = try restoringASR.acquireExclusiveActivity(activity)
                 fatalError("A new activity must not race into the suspended import")

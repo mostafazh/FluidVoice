@@ -192,13 +192,9 @@ struct TranscriptionHistoryView: View {
             .environment(\.theme, self.theme)
         }
         .sheet(item: self.$retranscriptionEntry) { entry in
-            HistoryRetranscriptionSheet(entry: entry) { text, model, duration in
-                self.historyStore.replaceTranscript(
-                    id: entry.id,
-                    with: text,
-                    speechModelID: model.id,
-                    transcriptionDurationMilliseconds: duration
-                )
+            HistoryRetranscriptionSheet(entry: entry) { text, model in
+                // No duration: the field holds ASR-only time and the sheet measures wall time.
+                self.historyStore.replaceTranscript(id: entry.id, with: text, speechModelID: model.id)
             }
             .environment(\.theme, self.theme)
         }
