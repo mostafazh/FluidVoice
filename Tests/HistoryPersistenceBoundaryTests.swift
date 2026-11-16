@@ -254,6 +254,7 @@ final class ImportingDefaults: UserDefaults {
         print("PASS: restore during loading replaces both memory and disk")
         try await self.testTodaySummary(root: root, defaults: defaults, audio: audio)
         try await self.testStars(root: root, defaults: defaults, audio: audio)
+        try await self.testReplaceTranscript(root: root, defaults: defaults, audio: audio)
         try await self.testLegacyImportAcrossBuilds(root: root, audio: audio)
         try await self.testLegacyRecovery(root: root)
         try await self.testManualPruneResponsiveness(root: root)
@@ -778,6 +779,59 @@ final class ImportingDefaults: UserDefaults {
         } catch {}
         precondition(markedDefaults.data(forKey: key) == source, "A failed legacy import must keep legacy history")
         print("PASS: a failed legacy import fails the load and keeps legacy history")
+    }
+
+    @MainActor static func testReplaceTranscript(root: URL, defaults: UserDefaults, audio: DictationAudioMetadata) async throws {
+        let url = root.appendingPathComponent("retranscribe.sqlite3")
+        let writer = TranscriptionHistoryWriter(defaults: defaults, url: url)
+        let store = TranscriptionHistoryStore(writer: writer)
+        try await store.waitUntilLoaded()
+        let id = UUID()
+        store.addEntry(
+            id: id,
+            rawText: "shalom world",
+            processedText: "Shalom, world.",
+            appName: "Notes",
+            windowTitle: "Draft",
+            processingModel: "gpt",
+            transcriptionDurationMilliseconds: 40,
+            aiProcessingDurationMilliseconds: 90,
+            aiTokensPerSecond: 300,
+            audio: audio
+        )
+        store.toggleStar(id: id)
+        let before = store.entries.first { $0.id == id }
+        precondition(before?.wasAIProcessed == true)
+
+        precondition(!store.replaceTranscript(id: id, with: "  \n ", speechModelID: "whisper-large"), "Empty retranscripts must be rejected")
+        precondition(!store.replaceTranscript(id: UUID(), with: "text", speechModelID: "whisper-large"), "Missing entries must be rejected")
+        let replaced = store.replaceTranscript(
+            id: id,
+            with: "  shalom olam  ",
+            speechModelID: "whisper-large",
+            transcriptionDurationMilliseconds: 1200
+        )
+        precondition(replaced)
+
+        guard let after = store.entries.first(where: { $0.id == id }), let before else {
+            preconditionFailure("Retranscribed entry must stay in history")
+        }
+        precondition(after.rawText == "shalom olam" && after.processedText == "shalom olam", "New text replaces raw and final text")
+        precondition(after.characterCount == "shalom olam".count)
+        precondition(!after.wasAIProcessed && after.processingModel == nil, "Old AI cleanup no longer describes the text")
+        precondition(after.aiProcessingDurationMilliseconds == nil && after.aiTokensPerSecond == nil)
+        precondition(after.transcriptionDurationMilliseconds == 1200)
+        precondition(after.audio?.model == "whisper-large", "The saved audio records the model that produced the text")
+        precondition(after.audio?.fileName == audio.fileName, "The recording itself is unchanged")
+        precondition(after.timestamp == before.timestamp && after.appName == "Notes" && after.isStarred, "Context and pin survive")
+        precondition((after.searchRevision ?? 0) > (before.searchRevision ?? 0), "The search index must pick up the new text")
+        precondition(store.entries.first?.id == id, "Retranscribing must not reorder history")
+
+        await store.finishPendingWrites()
+        precondition(store.persistenceError == nil)
+        let reloaded = try await TranscriptionHistoryWriter(defaults: defaults, url: url).load()
+        precondition(reloaded == store.entries, "Retranscribed text must round-trip")
+        print("PASS: retranscription replaces text, drops stale AI metadata, keeps audio, pin and order")
     }
 
     @MainActor static func testStars(root: URL, defaults: UserDefaults, audio: DictationAudioMetadata) async throws {

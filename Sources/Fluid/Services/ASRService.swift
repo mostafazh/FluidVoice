@@ -368,6 +368,7 @@ enum ASRExclusiveActivity: String, Equatable {
     case dictation
     case fileTranscription
     case localAPI
+    case historyRetranscription
     case meeting
     case modelMaintenance
     case settingsRestore
@@ -380,6 +381,8 @@ enum ASRExclusiveActivity: String, Equatable {
             return "file transcription"
         case .localAPI:
             return "local API transcription"
+        case .historyRetranscription:
+            return "history retranscription"
         case .meeting:
             return "meeting transcription"
         case .modelMaintenance:
@@ -3990,6 +3993,72 @@ final class ASRService: ObservableObject {
         self.stopUIInvalidationTimeoutTask = nil
         self.objectWillChange.send()
         self.deferredStopUIInvalidationDidFlush.send()
+    }
+
+    // MARK: - History Retranscription
+
+    /// Runs a saved dictation recording through `model` without changing the
+    /// selected model. Another model is loaded for this call only and released
+    /// when it returns. Nothing is downloaded: the model must already be installed.
+    func retranscribeSavedAudio(
+        _ inputSamples: [Float],
+        with model: SettingsStore.SpeechModel
+    ) async throws -> ASRTranscriptionResult {
+        let lease = try self.acquireExclusiveActivity(.historyRetranscription)
+        defer { self.releaseExclusiveActivity(lease) }
+        guard !inputSamples.isEmpty else { throw HistoryRetranscriptionError.emptyAudio }
+
+        var samples = inputSamples
+        let minSamples = 16_000
+        if samples.count < minSamples {
+            samples.append(contentsOf: repeatElement(0.0, count: minSamples - samples.count))
+        }
+
+        let provider: TranscriptionProvider
+        if model == SettingsStore.shared.selectedSpeechModel {
+            try await self.ensureAsrReady()
+            provider = self.transcriptionProvider
+        } else {
+            let candidate = self.getProvider(for: model)
+            // Apple's system models have no app-managed files to check.
+            let isBuiltIn = model == .appleSpeech || model == .appleSpeechAnalyzer
+            if !isBuiltIn {
+                guard try await self.modelArtifactsExist(provider: candidate) else {
+                    throw HistoryRetranscriptionError.modelNotInstalled(model.displayName)
+                }
+            }
+            try await candidate.prepare(progressHandler: nil)
+            provider = candidate
+        }
+        return try await self.runRetranscription(samples, provider: provider)
+    }
+
+    private func runRetranscription(
+        _ samples: [Float],
+        provider: TranscriptionProvider
+    ) async throws -> ASRTranscriptionResult {
+        try Task.checkCancellation()
+        guard provider.isReady else {
+            throw NSError(
+                domain: "ASRService",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Transcription provider is not ready."]
+            )
+        }
+        DebugLogger.shared.info(
+            "Retranscribing saved audio with \(provider.name) (\(samples.count) samples)",
+            source: "ASRService"
+        )
+        let result = try await self.transcriptionExecutor.run { [provider] in
+            // Detach so inference does not run on, or wait for, the main thread.
+            try await Task.detached(priority: .userInitiated) {
+                try await provider.transcribeFinal(samples)
+            }.value
+        }
+        let cleanedText = ASRService.applySpokenPunctuationFormatting(
+            ASRService.applyCustomDictionary(ASRService.removeFillerWords(result.text))
+        )
+        return ASRTranscriptionResult(text: cleanedText, confidence: result.confidence)
     }
 
     func transcribeSamplesForAPI(_ inputSamples: [Float]) async throws -> ASRTranscriptionResult {

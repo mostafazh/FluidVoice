@@ -37,6 +37,7 @@ struct TranscriptionHistoryView: View {
     @State private var showClearConfirmation: Bool = false
     @State private var showReportConfirmation: Bool = false
     @State private var selectedReportEntry: TranscriptionHistoryEntry?
+    @State private var retranscriptionEntry: TranscriptionHistoryEntry?
     @State private var audioEntryID: UUID?
     @State private var copiedEntryID: UUID?
     @State private var copyFeedbackTask: Task<Void, Never>?
@@ -187,6 +188,17 @@ struct TranscriptionHistoryView: View {
             TranscriptionFeedbackReportSheet(entry: entry) {
                 self.selectedReportEntry = nil
                 self.showReportConfirmation = true
+            }
+            .environment(\.theme, self.theme)
+        }
+        .sheet(item: self.$retranscriptionEntry) { entry in
+            HistoryRetranscriptionSheet(entry: entry) { text, model, duration in
+                self.historyStore.replaceTranscript(
+                    id: entry.id,
+                    with: text,
+                    speechModelID: model.id,
+                    transcriptionDurationMilliseconds: duration
+                )
             }
             .environment(\.theme, self.theme)
         }
@@ -437,6 +449,12 @@ struct TranscriptionHistoryView: View {
             Divider()
 
             Button {
+                self.retranscriptionEntry = entry
+            } label: {
+                Label("Retranscribe with…", systemImage: "arrow.triangle.2.circlepath")
+            }
+
+            Button {
                 self.exportPair(entry)
             } label: {
                 Label("Export Pair...", systemImage: "square.and.arrow.up")
@@ -614,6 +632,9 @@ struct TranscriptionHistoryView: View {
                                 )
                             }
                         }
+                        if let voiceModel = self.recordedVoiceModel(entry) {
+                            self.metadataItem(icon: "waveform.badge.mic", label: "Voice model", value: voiceModel)
+                        }
                         self.metadataItem(
                             icon: "sparkles",
                             label: entry.aiProcessingError == nil ? "AI model" : "AI model (failed)",
@@ -655,6 +676,11 @@ struct TranscriptionHistoryView: View {
     private func recordedModel(_ entry: TranscriptionHistoryEntry) -> String? {
         guard let model = entry.processingModel?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty else { return nil }
         return ModelDisplayName.forID(model)
+    }
+
+    private func recordedVoiceModel(_ entry: TranscriptionHistoryEntry) -> String? {
+        guard let id = entry.audio?.model?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { return nil }
+        return SettingsStore.SpeechModel(rawValue: id)?.displayName ?? id
     }
 
     private func detailActions(_ entry: TranscriptionHistoryEntry) -> some View {

@@ -228,6 +228,49 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
         )
     }
 
+    /// The same recording with a new transcript from `speechModelID`. The new text
+    /// becomes both raw and final text, so earlier AI cleanup and its metrics are
+    /// dropped. Timing that described the old run no longer applies either.
+    func replacingTranscript(
+        _ text: String,
+        speechModelID: String,
+        transcriptionDurationMilliseconds: Int?,
+        at date: Date = Date()
+    ) -> TranscriptionHistoryEntry {
+        let audio = self.audio.map {
+            DictationAudioMetadata(
+                fileName: $0.fileName,
+                durationMilliseconds: $0.durationMilliseconds,
+                byteCount: $0.byteCount,
+                sampleRate: $0.sampleRate,
+                channels: $0.channels,
+                model: speechModelID
+            )
+        }
+        var entry = TranscriptionHistoryEntry(
+            id: self.id,
+            timestamp: self.timestamp,
+            rawText: text,
+            processedText: text,
+            appName: self.appName,
+            windowTitle: self.windowTitle,
+            characterCount: text.count,
+            wasAIProcessed: false,
+            processingModel: nil,
+            transcriptionDurationMilliseconds: transcriptionDurationMilliseconds,
+            parakeetProcessingDurationMilliseconds: nil,
+            aiProcessingDurationMilliseconds: nil,
+            aiTokensPerSecond: nil,
+            aiProcessingError: nil,
+            audio: audio,
+            isStarred: self.isStarred,
+            searchRevision: self.searchRevision
+        )
+        // The search index only replaces a row whose revision rose.
+        entry.markRestored(over: self.searchRevision, at: date)
+        return entry
+    }
+
     /// A restore can hand an existing id different text, and the search index only
     /// replaces a row whose revision rose. Bumping past the restored revision, the
     /// indexed one and the wall clock keeps that true whichever backup the text came
@@ -377,6 +420,32 @@ final class TranscriptionHistoryStore: ObservableObject {
         }
 
         DebugLogger.shared.debug("Added transcription to history (total: \(self.entries.count))", source: "TranscriptionHistoryStore")
+    }
+
+    /// Replaces an entry's transcript after its saved audio was retranscribed.
+    /// Returns false when the entry no longer exists or the text is empty.
+    @discardableResult
+    func replaceTranscript(
+        id: UUID,
+        with text: String,
+        speechModelID: String,
+        transcriptionDurationMilliseconds: Int? = nil
+    ) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = self.entries.firstIndex(where: { $0.id == id })
+        else {
+            return false
+        }
+        self.entries[index] = self.entries[index].replacingTranscript(
+            trimmed,
+            speechModelID: speechModelID,
+            transcriptionDurationMilliseconds: transcriptionDurationMilliseconds
+        )
+        self.refreshTodaySummary()
+        self.persist(upserts: [self.entries[index]])
+        DebugLogger.shared.info("Replaced transcript after retranscription", source: "TranscriptionHistoryStore")
+        return true
     }
 
     func toggleStar(id: UUID) {

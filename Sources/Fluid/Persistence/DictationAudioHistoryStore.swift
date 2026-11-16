@@ -102,6 +102,16 @@ final nonisolated class DictationAudioHistoryStore: @unchecked Sendable {
         return self.fileManager.fileExists(atPath: url.path)
     }
 
+    /// 16 kHz mono samples of an entry's saved recording, for retranscription.
+    func loadSamples(for entry: TranscriptionHistoryEntry) throws -> [Float] {
+        guard let url = self.audioFileURL(for: entry),
+              self.fileManager.fileExists(atPath: url.path)
+        else {
+            throw DictationAudioHistoryError.audioMissing
+        }
+        return try DictationAudioWAVDecoder.samples(contentsOf: url)
+    }
+
     func audioFileExists(fileName: String) -> Bool {
         guard let url = self.audioFileURL(fileName: fileName, createIfNeeded: false) else { return false }
         return self.fileManager.fileExists(atPath: url.path)
